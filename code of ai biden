@@ -1,0 +1,103 @@
+import torch
+import torchaudio
+from transformers import GPT2LMHeadModel, GPT2Tokenizer, Trainer, TrainingArguments
+from datasets import load_dataset
+from flask import Flask, request, jsonify
+
+
+def fine_tune_model():
+
+    dataset = load_dataset("text", data_files={"train": "transcripts.txt"})
+
+   
+    model_name = 'gpt2'
+    model = GPT2LMHeadModel.from_pretrained(model_name)
+    tokenizer = GPT2Tokenizer.from_pretrained(model_name)
+ 
+   
+    def tokenize_function(examples):
+        return tokenizer(examples["text"], padding="max_length", truncation=True)
+
+    tokenized_dataset = dataset.map(tokenize_function, batched=True)
+
+  
+    training_args = TrainingArguments(
+        output_dir="./results",
+        evaluation_strategy="epoch",
+        learning_rate=2e-5,
+        per_device_train_batch_size=2,
+        num_train_epochs=3,
+        weight_decay=0.01,
+    )
+
+   
+    trainer = Trainer(
+        model=model,
+        args=training_args,
+        train_dataset=tokenized_dataset["train"],
+    )
+
+    
+    trainer.train()
+
+  
+    model.save_pretrained("fine-tuned-model")
+    tokenizer.save_pretrained("fine-tuned-model")
+
+
+def load_voice_models():
+    bundle = torchaudio.pipelines.TACOTRON2_WAVERNN_PHONE_LJSPEECH
+    processor = bundle.get_text_processor()
+    tacotron2 = bundle.get_tacotron2()
+    vocoder = bundle.get_vocoder()
+    return processor, tacotron2, vocoder
+
+def text_to_speech(processor, tacotron2, vocoder, text):
+    with torch.inference_mode():
+        processed, lengths = processor(text)
+        spec, _, _ = tacotron2.infer(processed, lengths)
+        waveforms, lengths = vocoder(spec)
+    return waveforms
+
+
+def generate_video(audio_file, output_file):
+   
+    pass
+
+
+app = Flask(__name__)
+
+
+model_name = 'fine-tuned-model'
+model = GPT2LMHeadModel.from_pretrained(model_name)
+tokenizer = GPT2Tokenizer.from_pretrained(model_name)
+
+
+processor, tacotron2, vocoder = load_voice_models()
+
+
+@app.route('/ask', methods=['POST'])
+def ask():
+    question = request.json.get('question')
+    inputs = tokenizer(question, return_tensors="pt")
+    outputs = model.generate(**inputs)
+    response = tokenizer.decode(outputs[0], skip_special_tokens=True)
+
+   
+    waveform = text_to_speech(processor, tacotron2, vocoder, response)
+    audio_file = "output.wav"
+    torchaudio.save(audio_file, waveform.squeeze(1), sample_rate=22050)
+
+   
+    video_file = "output_video.mp4"
+    generate_video(audio_file, video_file)
+
+    return jsonify({'response': response, 'audio': audio_file, 'video': video_file})
+
+if __name__ == '__main__':
+   
+    fine_tune_model()
+
+    
+    app.run()
+
